@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Label OCR Prototype</title>
+    <style>
+      body { font-family: Arial, sans-serif; max-width: 900px; margin: 2rem auto; }
+      .preview { margin-top: 1rem; }
+      textarea { width: 100%; height: 200px; }
+    </style>
+  </head>
+  <body>
+    <h1>Label OCR Prototype</h1>
+    <p>Upload a single image or multiple images (batch) to extract label fields.</p>
+
+    <h2>Single upload</h2>
+    <form id="single-form">
+      <input type="file" id="single-file" name="image" accept="image/*" />
+      <button type="submit">Upload</button>
+    </form>
+
+    <h2>Batch upload</h2>
+    <form id="batch-form">
+      <input type="file" id="batch-files" name="images" accept="image/*" multiple />
+      <button type="submit">Upload Batch</button>
+    </form>
+
+    <div class="preview">
+      <h3>Result</h3>
+      <textarea id="result" readonly></textarea>
+    </div>
+
+    <script>
+      const singleForm = document.getElementById('single-form');
+      const singleFile = document.getElementById('single-file');
+      const batchForm = document.getElementById('batch-form');
+      const batchFiles = document.getElementById('batch-files');
+      const resultArea = document.getElementById('result');
+
+      singleForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        if (!singleFile.files.length) return alert('Select a file');
+        const fd = new FormData();
+        fd.append('image', singleFile.files[0]);
+        resultArea.value = 'Processing...';
+        const resp = await fetch('/upload', { method: 'POST', body: fd });
+        const data = await resp.json();
+        resultArea.value = JSON.stringify(data, null, 2);
+      });
+
+      batchForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        if (!batchFiles.files.length) return alert('Select files');
+        const fd = new FormData();
+        for (const f of batchFiles.files) fd.append('images', f);
+        resultArea.value = 'Processing batch...';
+        const resp = await fetch('/upload/batch', { method: 'POST', body: fd });
+        const data = await resp.json();
+        resultArea.value = JSON.stringify(data, null, 2);
+      });
+    </script>
+  </body>
+</html>
