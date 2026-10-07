@@ -1,6 +1,5 @@
 FROM python:3.11-slim
 
-# Install minimal runtime deps for OpenCV and numeric libraries used by EasyOCR
 RUN apt-get update && apt-get install -y --no-install-recommends \
 	libglib2.0-0 \
 	libsm6 \
@@ -12,12 +11,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
+# CPU-only torch keeps the image small enough for fast Azure cold starts
+RUN pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu
+
 COPY requirements.txt ./
-# Install Python requirements (EasyOCR and dependencies)
 RUN pip install --no-cache-dir -r requirements.txt
+
+# Bake EasyOCR models into the image so the app works offline and starts fast
+RUN python -c "import easyocr; easyocr.Reader(['en'], gpu=False)"
 
 COPY . /app
 
+ENV PORT=8000
 EXPOSE 8000
 
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port ${PORT}"]
