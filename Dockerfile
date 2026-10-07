@@ -1,27 +1,19 @@
 FROM python:3.11-slim
 
-# Install tesseract and required system deps
+# Install minimal runtime deps for OpenCV and numeric libraries used by EasyOCR
 RUN apt-get update && apt-get install -y --no-install-recommends \
-	tesseract-ocr \
-	libtesseract-dev \
-	libleptonica-dev \
-	build-essential \
-	pkg-config \
-	# OpenCV runtime dependencies
 	libglib2.0-0 \
 	libsm6 \
 	libxrender1 \
 	libxext6 \
-	libgl1 \
-	# PaddlePaddle / numerical runtime deps
 	libgomp1 \
-	libopenblas-dev \
+	libopenblas0 \
 	&& rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
 COPY requirements.txt ./
-# Install Python requirements (EasyOCR will be installed from requirements)
+# Install Python requirements (EasyOCR and dependencies)
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . /app
