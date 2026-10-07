@@ -2,6 +2,34 @@
 
 A small FastAPI prototype that accepts label images, runs OCR (EasyOCR), and extracts simple label fields: brand, class/type, alcohol content, net contents, and whether the government warning is present.
 
+## Approach, tools and assumptions
+
+### Approach
+1. **Upload:** a FastAPI endpoint receives a label image (single or batch) from the web UI or any HTTP client.
+2. **OCR:** EasyOCR reads the original color image, scaled to a sensible size. If that returns nothing, a fallback pipeline (grayscale, denoise, threshold, deskew, glare removal, text-region detection, per-region OCR) is used.
+3. **Field extraction:** simple heuristics pull out the fields: brand is the first line of text, and regexes find alcohol content (`%` or proof), net contents (mL, L, FL OZ) and class/type (from a keyword list).
+4. **Government warning:** the OCR text is fuzzy-matched against the canonical warning text, ignoring case, spacing and punctuation. If it isn't found, the image is re-read in upscaled bands to catch small print.
+5. **Deploy:** the app is packaged in a Docker image and hosted on Azure Container Apps. GitHub Actions redeploys it on every push.
+
+### Tools used
+- **Application:** Python 3.11, FastAPI, Uvicorn, EasyOCR (CPU-only PyTorch), OpenCV, Pillow, NumPy, and a single-page HTML UI.
+- **Testing:** pytest unit tests plus the sample images in `test labels/`.
+- **Packaging and cloud:** Docker, Azure Container Registry (remote image builds), Azure Container Apps, and the Azure CLI.
+- **Source control and CI/CD:** Git, GitHub, and GitHub Actions authenticating to Azure with OIDC (no stored passwords).
+- **Development:** Visual Studio Code with GitHub Copilot.
+
+### How this was built
+I have working knowledge of both HTML and Python, but I used GitHub Copilot and Visual Studio Code to build the majority of this application. I also integrated the repository with GitHub and set up a GitHub Actions workflow that automatically publishes to Azure on every push to `main`.
+
+### Assumptions
+- Input is a photo or scan of a single label, in a common image format (JPG or PNG), with mostly horizontal, legible text.
+- Labels are in English. The OCR model is loaded for English only.
+- Alcohol content and net contents appear as `NN%` or `NN proof`, and as a number plus mL, L or FL OZ.
+- The brand is the first line of recognized text, and class/type is one of a fixed keyword list (bourbon, whiskey, vodka, gin, rum, wine, beer, ...).
+- The government warning follows the standard U.S. wording. A fuzzy score of 0.85 or higher counts as present. This is a likelihood check, not a legal compliance check.
+- This is a prototype. There is no authentication, storage or rate limiting, and results depend on image quality.
+- A single always-on replica (2 vCPU / 4 GiB) is enough for demo traffic and avoids OCR cold starts.
+
 ## Live deployment (Azure)
 
 The app is deployed to **Azure Container Apps** and is publicly reachable:
