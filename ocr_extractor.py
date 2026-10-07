@@ -1,4 +1,4 @@
-"""EasyOCR-only OCR extractor for label images.
+﻿"""EasyOCR-only OCR extractor for label images.
 
 This module provides extract_fields_from_image and debug_extract_fields_from_image
 used by the FastAPI app. It is intentionally simple and uses EasyOCR when
@@ -9,6 +9,7 @@ import io
 import re
 import base64
 import logging
+import difflib
 from typing import List, Tuple
 from PIL import Image
 import cv2
@@ -159,6 +160,61 @@ def _ocr_original_image(image_bytes: bytes) -> str:
     return _ocr_recognize(img)
 
 
+WARNING_MATCH_THRESHOLD = 0.85
+
+
+def _squash(s: str) -> str:
+    """Uppercase and drop everything except letters/digits so case, spacing and punctuation don't matter."""
+    return re.sub(r"[^A-Z0-9]", "", s.upper())
+
+
+def _match_government_warning(text: str) -> float:
+    """Return a 0..1 similarity between the canonical warning and the best matching span of text."""
+    ref = _squash(GOVERNMENT_WARNING)
+    hay = _squash(text)
+    if not hay:
+        return 0.0
+    if ref in hay:
+        return 1.0
+
+    header = ref[:len("GOVERNMENTWARNING")]
+    starts = [0]
+    for i in range(0, max(1, len(hay) - len(header) + 1)):
+        m = difflib.SequenceMatcher(None, header, hay[i:i + len(header)], autojunk=False)
+        if m.quick_ratio() >= 0.8 and m.ratio() >= 0.8:
+            starts.append(i)
+
+    best = 0.0
+    span = len(ref) + 20
+    for s in starts:
+        window = hay[s:s + span]
+        score = difflib.SequenceMatcher(None, ref, window, autojunk=False).ratio()
+        # ratio() penalizes a window longer than ref, so also score against the exact-length slice
+        score = max(score, difflib.SequenceMatcher(None, ref, window[:len(ref)], autojunk=False).ratio())
+        best = max(best, score)
+    return best
+
+
+def _ocr_small_text(image_bytes: bytes) -> str:
+    """Second pass for tiny print: OCR overlapping horizontal bands, each upscaled."""
+    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    img = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+    h, w = img.shape[:2]
+    bands = 3
+    band_h = h // bands
+    overlap = int(band_h * 0.2)
+    texts = []
+    for b in range(bands):
+        y1 = max(0, b * band_h - overlap)
+        y2 = min(h, (b + 1) * band_h + overlap)
+        crop = img[y1:y2, :]
+        scale = min(3.0, max(1.0, 2400 / max(crop.shape[1], 1)))
+        if scale > 1.0:
+            crop = cv2.resize(crop, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+        texts.append(_ocr_recognize(crop))
+    return "\n".join(t for t in texts if t)
+
+
 def _run_tesseract_on_image(cv_img: np.ndarray) -> str:
     """Compatibility wrapper name used by tests. Uses EasyOCR under the hood."""
     return _ocr_recognize(cv_img)
@@ -212,8 +268,14 @@ def extract_fields_from_image(image_bytes: bytes) -> dict:
     net_match = re.search(r"\b(\d+(?:\.\d+)?\s*(?:ML|MILLILITER|L|LITER|FL\s?OZ))\b", text_full, re.IGNORECASE)
     net_contents = net_match.group(0) if net_match else ""
 
-    normalized = _normalize_text(text_full)
-    gw_present = _normalize_text(GOVERNMENT_WARNING) in normalized
+    gw_score = _match_government_warning(text_full)
+    if gw_score < WARNING_MATCH_THRESHOLD and isinstance(gray, np.ndarray):
+        extra = _ocr_small_text(image_bytes)
+        extra_score = _match_government_warning(text_full + "\n" + extra)
+        if extra_score > gw_score:
+            gw_score = extra_score
+            text_full = text_full + "\n" + extra
+    gw_present = gw_score >= WARNING_MATCH_THRESHOLD
 
     type_match = re.search(r"\b(BOURBON|WHISKEY|WHISKY|VODKA|GIN|WINE|BEER|DISTILLED SPIRITS|RUM)\b", text_full, re.IGNORECASE)
     class_type = type_match.group(0) if type_match else ""
@@ -225,6 +287,7 @@ def extract_fields_from_image(image_bytes: bytes) -> dict:
         "alcohol_content": abv,
         "net_contents": net_contents,
         "government_warning_present": gw_present,
+        "government_warning_score": round(gw_score, 3),
     }
 
 
@@ -275,141 +338,6 @@ def debug_extract_fields_from_image(image_bytes: bytes) -> dict:
         _, buf = cv2.imencode('.jpg', canvas)
         overlay_b64 = base64.b64encode(buf.tobytes()).decode('ascii')
 
-    fields = extract_fields_from_image(image_bytes)
-
-    return {
-        "fields": fields,
-        "engine": diagnostics["engine"],
-        "boxes": diagnostics["boxes"],
-        "region_texts": diagnostics["region_texts"],
-        "overlay_image_base64": overlay_b64,
-    }
-
-    # If preprocessing returned something unexpected (e.g., test monkeypatch returns bytes), fall back
-    if not isinstance(gray, np.ndarray):
-        raw_text = _run_tesseract_on_image(gray)
-        lines = [l.strip() for l in raw_text.splitlines() if l.strip()]
-        text_full = "\n".join(lines)
-    else:
-        # deskew, remove glare
-        img_ds = _deskew_image(gray)
-        img_noglare = _remove_glare(img_ds)
-
-        # detect text regions
-        boxes = _detect_text_regions(img_noglare)
-        region_texts = []
-        if not boxes:
-            # fallback to whole image OCR
-            raw_text = _run_tesseract_on_image(img_noglare)
-            region_texts = [raw_text]
-        else:
-            for (x1, y1, x2, y2) in boxes:
-                crop = img_noglare[y1:y2, x1:x2]
-                # upscale and enhance
-                h, w = crop.shape[:2]
-                scale = max(1, 800 // max(h, w))
-                crop_rs = cv2.resize(crop, (w * scale, h * scale), interpolation=cv2.INTER_CUBIC)
-                if len(crop_rs.shape) == 2:
-                    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-                    crop_rs = clahe.apply(crop_rs)
-                raw = _run_tesseract_on_image(crop_rs)
-                region_texts.append(raw)
-        # join region texts in order
-        lines = []
-        for rt in region_texts:
-            for l in rt.splitlines():
-                if l.strip():
-                    lines.append(l.strip())
-        text_full = "\n".join(lines)
-
-    # Brand: heuristics - assume the largest line near top; here we pick the first non-small line
-    brand = lines[0] if lines else ""
-
-    # Alcohol content (ABV) regex
-    abv_match = re.search(r"(\d{1,2}(?:\.\d)?\s?%\s*(?:ALC\.?\/?VOL\.?)?)|(?:\d{1,3}\s?PROOF)", text_full, re.IGNORECASE)
-    abv = abv_match.group(0) if abv_match else ""
-
-    # Net contents
-    net_match = re.search(r"\b(\d+(?:\.\d+)?\s*(?:ML|MILLILITER|L|LITER|FL\s?OZ))\b", text_full, re.IGNORECASE)
-    net_contents = net_match.group(0) if net_match else ""
-
-    # Government warning - normalize and compare prefix
-    normalized = _normalize_text(text_full)
-    gw_present = _normalize_text(GOVERNMENT_WARNING) in normalized
-
-    # Class/Type: look for keywords like 'WHISKEY', 'BOURBON', 'VODKA', 'WINE', 'BEER'
-    type_match = re.search(r"\b(BOURBON|WHISKEY|WHISKY|VODKA|GIN|WINE|BEER|DISTILLED SPIRITS|RUM)\b", text_full, re.IGNORECASE)
-    class_type = type_match.group(0) if type_match else ""
-
-    return {
-        "raw_text": text_full,
-        "brand": brand,
-        "class_type": class_type,
-        "alcohol_content": abv,
-        "net_contents": net_contents,
-        "government_warning_present": gw_present,
-    }
-
-
-def debug_extract_fields_from_image(image_bytes: bytes) -> dict:
-    """Run extraction but also return diagnostic information (boxes, per-region OCR, engine).
-
-    Useful for troubleshooting why an image produced empty results.
-    Returns a dict with keys: fields (same as extract_fields...), engine, boxes, region_texts, overlay_image (base64)
-    """
-    import base64
-
-    gray = _preprocess_image_bytes(image_bytes)
-    diagnostics = {"engine": OCR_ENGINE, "boxes": [], "region_texts": []}
-
-    if not isinstance(gray, np.ndarray):
-        raw_text = _run_tesseract_on_image(gray)
-        region_texts = [raw_text]
-        boxes = []
-        canvas = None
-    else:
-        img_color = None
-        # keep a color version for overlay
-        try:
-            pil = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-            img_color = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
-        except Exception:
-            img_color = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
-
-        img_ds = _deskew_image(gray)
-        img_noglare = _remove_glare(img_ds)
-
-        boxes = _detect_text_regions(img_noglare)
-        region_texts = []
-        for (x1, y1, x2, y2) in boxes:
-            crop = img_noglare[y1:y2, x1:x2]
-            h, w = crop.shape[:2]
-            scale = max(1, 800 // max(h, w))
-            crop_rs = cv2.resize(crop, (w * scale, h * scale), interpolation=cv2.INTER_CUBIC)
-            if len(crop_rs.shape) == 2:
-                try:
-                    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-                    crop_rs = clahe.apply(crop_rs)
-                except Exception:
-                    pass
-            raw = _run_tesseract_on_image(crop_rs)
-            region_texts.append(raw)
-
-        # build overlay image showing boxes
-        canvas = img_color.copy()
-        for (x1, y1, x2, y2) in boxes:
-            cv2.rectangle(canvas, (x1, y1), (x2, y2), (0, 255, 0), 2)
-
-    diagnostics["boxes"] = boxes
-    diagnostics["region_texts"] = region_texts
-
-    # Encode overlay image to base64 if available
-    overlay_b64 = None
-    if 'canvas' in locals() and canvas is not None:
-        _, buf = cv2.imencode('.jpg', canvas)
-        overlay_b64 = base64.b64encode(buf.tobytes()).decode('ascii')
-
-    # Reuse main extractor to compute field values
     fields = extract_fields_from_image(image_bytes)
 
     return {
