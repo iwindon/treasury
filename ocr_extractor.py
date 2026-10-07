@@ -8,10 +8,13 @@ available; otherwise OCR calls return empty strings.
 import io
 import re
 import base64
+import logging
 from typing import List, Tuple
 from PIL import Image
 import cv2
 import numpy as np
+
+logger = logging.getLogger("uvicorn.error")
 
 # Lazy EasyOCR import to avoid heavy model download on module import during tests
 _easy_reader = None
@@ -29,6 +32,7 @@ def _get_easy_reader():
 
         _easy_reader = easyocr.Reader(["en"], gpu=False)
     except Exception:
+        logger.exception("EasyOCR reader failed to initialize")
         _easy_reader = None
     return _easy_reader
 
@@ -133,10 +137,26 @@ def _ocr_recognize(cv_img: np.ndarray) -> str:
             img_rgb = cv2.cvtColor(cv_img, cv2.COLOR_GRAY2RGB)
         else:
             img_rgb = cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB) if cv_img.shape[2] == 3 else cv2.cvtColor(cv_img, cv2.COLOR_GRAY2RGB)
-        texts = reader.readtext(img_rgb, detail=0)
+        texts = reader.readtext(img_rgb, detail=0, paragraph=False)
         return "\n".join(texts)
     except Exception:
+        logger.exception("EasyOCR readtext failed")
         return ""
+
+
+def _ocr_original_image(image_bytes: bytes) -> str:
+    """OCR the untouched color image; EasyOCR's own detector works best without binarization."""
+    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    img = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+    h, w = img.shape[:2]
+    longest = max(h, w)
+    if longest < 1200:
+        scale = 1200 / longest
+        img = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_CUBIC)
+    elif longest > 3000:
+        scale = 3000 / longest
+        img = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+    return _ocr_recognize(img)
 
 
 def _run_tesseract_on_image(cv_img: np.ndarray) -> str:
@@ -155,9 +175,12 @@ def extract_fields_from_image(image_bytes: bytes) -> dict:
     else:
         img_ds = _deskew_image(gray)
         img_noglare = _remove_glare(img_ds)
-        boxes = _detect_text_regions(img_noglare)
+        full_text = _ocr_original_image(image_bytes)
+        boxes = [] if full_text.strip() else _detect_text_regions(img_noglare)
         region_texts: List[str] = []
-        if not boxes:
+        if full_text.strip():
+            region_texts = [full_text]
+        elif not boxes:
             raw_text = _run_tesseract_on_image(img_noglare)
             region_texts = [raw_text]
         else:
