@@ -21,8 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 COPY requirements.txt ./
-# Install PaddlePaddle CPU wheel first (paddleocr depends on it). Use the official wheel index.
-RUN pip install --no-cache-dir "paddlepaddle-cpu==2.6.2" -f https://www.paddlepaddle.org.cn/whl/linux/mkl/avx/stable.html || true
+# Install Python requirements (EasyOCR will be installed from requirements)
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . /app
